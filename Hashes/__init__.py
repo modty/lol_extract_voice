@@ -4,91 +4,54 @@
 # @Site    : x-item.com
 # @Software: PyCharm
 # @Create  : 2021/3/4 22:11
-# @Update  : 2021/3/17 14:7
+# @Update  : 2021/9/19 21:46
 # @Detail  : 
 
 import gc
 import json
 import logging
 import os
+import re
 from collections import defaultdict
 from typing import Dict, List
 
-from lol_voice import get_event_hashtable, get_audio_hashtable
-from lol_voice.formats import BIN, WAD, StringHash
+from lol_voice import get_audio_hashtable, get_event_hashtable
+from lol_voice.formats import BIN, StringHash, WAD
 
 from Tools import data
-from Utils import str_get_number, tree, makedirs
+from Utils import makedirs, str_get_number, tree
+from Utils import downloader
 
 log = logging.getLogger(__name__)
 HASH_PATH = os.path.dirname(__file__)
 CDTB_PATH = os.path.join(HASH_PATH, 'CDTB', 'cdragontoolbox')
 EVENT_HASH_PATH = os.path.join(HASH_PATH, 'event')
 E2A_HASH_PATH = os.path.join(HASH_PATH, 'event2audio')
-GAME_HASH = os.path.join(CDTB_PATH, 'hashes.game.txt')
 LCU_HASH = os.path.join(CDTB_PATH, 'hashes.lcu.txt')
 
 __all__ = [
     'HASH_PATH',
     'EVENT_HASH_PATH',
     'E2A_HASH_PATH',
-    'filter_hashtable',
+    'get_binhash',
     'bin_to_data',
     'bin_to_event',
     'to_audio_hashtable'
 ]
 
 
-def filter_hashtable(update=False) -> Dict:
+def get_binhash(update=False) -> Dict:
     """
     根据CDTB提供的哈希表, 取出于所有于语音有关的bin文件
     :param update: 强制更新
     :return:
     """
 
-    champion_list = data.get_champions_name()
-
     target = os.path.join(HASH_PATH, 'bin.json')
     if os.path.exists(target) and not update:
         return json.load(open(target, encoding='utf-8'))
     else:
-        res = tree()
-        with open(GAME_HASH) as f:
-            for line in f:
-
-                h, p = line.replace('\n', '').split(' ', 1)
-                ext = p[-4:]
-
-                if ext not in ['.bin']:
-                    # 只筛选Bin文件
-                    continue
-
-                this = {str(int(h, 16)): p}
-                item = p.split('/')
-                count = len(item)
-
-                if count == 5:
-                    # 皮肤bin、地图bin、很多bin
-                    if 'root' in item[-1]:
-                        continue
-                    kind = item[1]
-                    if item[3] == 'skins':
-                        name = item[2]
-                        if name not in champion_list:
-                            # kind = 'companions'
-                            continue
-                    elif item[2] == 'shipping':
-                        name = item[3]
-                        if str_get_number(name) not in data.get_maps_id() and name != 'common':
-                            continue
-                    else:
-                        continue
-
-                    res[kind][name].update(this)
-
-        with open(target, 'w+', encoding='utf-8') as f:
-            json.dump(res, f)
-        return res
+        return get_binhash_by_local()
 
 
 def file_classify(b, region):
@@ -172,11 +135,11 @@ def bin_to_data(champion_path, common_path, regin, update=False) -> tree:
     if os.path.exists(target) and not update:
         res = json.load(open(target, encoding='utf-8'))
     else:
-        bin_hash = filter_hashtable(update)
+        bin_hash = get_binhash(update)
 
         res = tree()
         for kind, parts in bin_hash.items():
-            # companions为云顶小英雄特效音
+            # companions为云顶小英雄特效音, bin文件中没有事件信息
             if kind == 'companions':
                 continue
             for name, bins in parts.items():
@@ -198,8 +161,11 @@ def bin_to_data(champion_path, common_path, regin, update=False) -> tree:
                 for _id, raw in zip(ids, raw_bins):
                     if not raw:
                         continue
+                    # 解析Bin文件
                     b = BIN(raw)
+                    # 音频文件列表
                     p = b.audio_files
+                    # 去重
                     temp, fs = de_duplication(temp, p)
                     if fs:
                         bs.append(b)
@@ -243,11 +209,30 @@ def bin_to_event(kind, name, bin_datas: List[BIN] = None, update=False):
             with open(target, 'w+', encoding='utf-8') as f:
                 json.dump(list(res), f, cls=StringHash.dump_cls())
     del bin_datas
-    gc.collect()
     return res
 
 
 def to_audio_hashtable(items, wad_file, bin_data, _type, kind, name, skin, update=False):
+    """
+    根据提供的信息生成音频ID哈希表
+    :param items: 由bin_to_data返回的数据, 格式如下
+        {
+        "events":
+            "assets/sounds/wwise2016/vo/zh_cn/characters/aatrox/skins/base/aatrox_base_vo_events.bnk",
+        "audio":
+            ["assets/sounds/wwise2016/vo/zh_cn/characters/aatrox/skins/base/aatrox_base_vo_audio.bnk",
+            "assets/sounds/wwise2016/vo/zh_cn/characters/aatrox/skins/base/aatrox_base_vo_audio.wpk"]
+        }
+    :param wad_file: wad文件
+    :param bin_data: bin_to_event 返回
+    :param _type: 音频类型, VO/SFX/MUSIC
+    :param kind: 音频类型, characters/companions/maps
+    :param name: 英雄或地图名字
+    :param skin: 皮肤或地图
+    :param update: 是否强制更新
+    :return:
+    """
+
     def tt(value):
         temp = False
         if isinstance(value, list):
@@ -256,7 +241,12 @@ def to_audio_hashtable(items, wad_file, bin_data, _type, kind, name, skin, updat
             return bool(temp)
         return bool(value)
 
-    target = os.path.join(HASH_PATH, 'event2audio', _type, kind, name,
+    region = re.compile(r'\w{2}_\w{2}').search(wad_file)
+    if region:
+        region = region.group()
+    else:
+        region = 'Default'
+    target = os.path.join(HASH_PATH, 'event2audio', region, _type, kind, name,
                           f'{skin}.json')
     if os.path.exists(target) and not update:
         # 可以直接pass 这里json加载用来校验文件是否正常
@@ -267,7 +257,7 @@ def to_audio_hashtable(items, wad_file, bin_data, _type, kind, name, skin, updat
 
     else:
         res = tree()
-        relative_pathwad_path = 'Game' + wad_file.split('Game')[-1].replace('\\', '/')
+        relative_wad_path = 'Game' + wad_file.split('Game')[-1].replace('\\', '/')
         for item in items:
             if not item['events']:
                 log.warning(f'无事件文件: {kind}, {name}, {skin}, {_type}')
@@ -296,22 +286,49 @@ def to_audio_hashtable(items, wad_file, bin_data, _type, kind, name, skin, updat
             del event_raw
             del data_raw
             del audio_raw
-            gc.collect()
 
-            if res:
-                path = os.path.dirname(target)
+        if res:
+            path = os.path.dirname(target)
 
-                makedirs(path)
-                res['info'] = {
-                    'kind': kind,
-                    'name': name,
-                    'detail': skin,
-                    'type': _type,
-                    'wad': relative_pathwad_path
-                }
-                with open(target, 'w+', encoding='utf-8') as f:
-                    json.dump(res, f)
+            makedirs(path)
+            res['info'] = {
+                'kind': kind,
+                'name': name,
+                'detail': skin,
+                'type': _type,
+                'wad': relative_wad_path
+            }
+            with open(target, 'w+', encoding='utf-8') as f:
+                json.dump(res, f)
         del res
         gc.collect()
         # log.info(f'to_audio_hashtable: {kind}, {name}, {skin}, {_type}')
 
+
+def get_binhash_by_local():
+    """
+    穷举
+    :return:
+    """
+    result = {
+        "characters": {},
+        "maps": {
+            "common": {
+                "15714053217970310635": "data/maps/shipping/common/common.bin"
+            },
+            "map11": {"4648248922051545971": "data/maps/shipping/map11/map11.bin"},
+            "map12": {"10561014283630087560": "data/maps/shipping/map12/map12.bin"},
+            "map21": {"15820477637625025279": "data/maps/shipping/map21/map21.bin"},
+            "map22": {"2513799657867357310": "data/maps/shipping/map22/map22.bin"}
+        }}
+    champion_list = data.get_champions_name()
+    tpl = 'data/characters/{}/skins/skin{}.bin'
+
+    for item in champion_list.keys():
+        if item == 'none':
+            continue
+        result['characters'].update({item: {WAD.get_hash(tpl.format(item, i)): tpl.format(item, i) for i in range(101)}})
+    target = os.path.join(HASH_PATH, 'bin.json')
+    with open(target, 'w+') as f:
+        json.dump(result, f)
+    return result

@@ -22,17 +22,9 @@ v2版本相对于之前的版本有比较大的更新:
 
 ### 安装
 ```shell
-git clone --recurse-submodules -b v2 https://github.com/Virace/lol_extract_voice
-```
-注意子模块CDTB的哈希表更新, 
-```shell
-git submodule update
+git clone -b v2 https://github.com/Virace/lol_extract_voice
 ```
 
-如果你clone的时候没有添加 **--recurse-submodules** 参数, 也可以在之后执行
-```shell
-git submodule init
-```
 
 因为部分代码使用了新版本特性, 比如: 海象表达式等. 所以Python版本最低为3.8
 
@@ -45,15 +37,17 @@ pip install -r requirements.txt
 ### 使用
 使用前查看[index.py](index.py), main函数文档. 
 
-直接进入目录新建test.py
+直接进入目录新建test.py, (名字无要求)
 ```python
 from index import main
-main(r'C:\League of Legends',
-     r"C:\Out",
-     r'C:\vgmstream-win\test.exe',
-     'zh_cn',
-     'wav',
-     5)
+
+if __name__ == '__main__': 
+  main(r'C:\League of Legends',
+       r"C:\Out",
+       r'C:\vgmstream-win\test.exe',
+       'zh_cn',
+       'wav',
+       5)
 ```
 第三个参数为vgmstream工具, 可以在这里下载[https://vgmstream.org/downloads](https://vgmstream.org/downloads), 用于转码.
 最后一个参数为多进程数量, 如果需要满载就不填写就行. 总线程超过32的CPU请手动填写实际数量.
